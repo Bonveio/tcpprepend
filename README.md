@@ -1,9 +1,9 @@
 # tcpprepend
 Simple TCP forwarder that prepends some fixed bytes to responses and ignores some fixed header on requests
 
-Install it by building (`cargo install --path .`) or download pre-built executables from [Github Releases](https://github.com/vi/tcpprepend/releases/).
+Install it by building (`cargo install --path .`) or download pre-built executables from [Github Releases](https://github.com/Bonveio/tcpprepend/releases/).
 
-# Example
+## Example
 
 ```
 A$ echo -n 'ABC' | base64
@@ -35,22 +35,32 @@ B> 555666
 C: 555666
 ```
 
-Psedo-HTTP server mode:
+Pseudo-HTTP server mode:
+```
+  $ tcpprepend 127.0.0.1:8080 DQoNCg== 127.0.0.1:1235 SFRUUC8xLjAgMjAwIE9LDQoNCg==
+  $ curl http://127.0.0.1:8080/
+```
 
-    $ tcpprepend 127.0.0.1:8080 DQoNCg== 127.0.0.1:1235 SFRUUC8xLjAgMjAwIE9LDQoNCg==
-    $ curl http://127.0.0.1:8080/
+Websocket:
+```
+  $ printf "%s" "HTTP/1.1 101 Switching Protocols/r/n/r/n" | base64
+  SFRUUC8xLjEgMTAxIFN3aXRjaGluZyBQcm90b2NvbHMvci9uL3Ivbg==
+  $ tcpprepend 0.0.0.0:80 DQoNCg== 127.0.0.1:22 SFRUUC8xLjEgMTAxIFN3aXRjaGluZyBQcm90b2NvbHMvci9uL3Ivbg==
+```
 
-# Usage line
+HTTP proxy (200 Connection Established):
+```
+  $ tcpprepend 0.0.0.0:8080 DQoNCg== 127.0.0.1:2424 SFRUUC8xLjEgMjAwIENvbm5lY3Rpb24gRXN0YWJsaXNoZWQNCg0K
+```
 
+### Usage line
 ```
 ARGS:
-    <listen>
+  <listen>
 
-    <request_needle_base64>
+  <request_needle_base64>
 
-    <connect>
+  <connect>
 
-    <response_prepend_base64>
- ```
-
-    
+  <response_prepend_base64>
+```

@@ -1,0 +1,211 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: x86_64-linux-gnu
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: x86_64-linux-musl
+          - target: i686-unknown-linux-gnu
+            os: ubuntu-latest
+            name: i686-linux-gnu
+          - target: i686-unknown-linux-musl
+            os: ubuntu-latest
+            name: i686-linux-musl
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: aarch64-linux-gnu
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            name: aarch64-linux-musl
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-latest
+            name: armv7-linux-gnueabihf
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            name: armv7-linux-musleabihf
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+            name: armv7-android
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+            name: aarch64-android
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: x86_64-windows-msvc
+            ext: .exe
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            name: x86_64-windows-gnu
+            ext: .exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
+
+      - name: Install ARM cross-compilation tools
+        if: contains(matrix.target, 'aarch64-unknown-linux') || contains(matrix.target, 'armv7-unknown-linux')
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+
+      - name: Configure aarch64-linux-gnu
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+
+      - name: Configure aarch64-linux-musl
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_musl=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+
+      - name: Configure armv7-linux-gnueabihf
+        if: matrix.target == 'armv7-unknown-linux-gnueabihf'
+        run: |
+          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
+          echo "CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
+          echo "CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++" >> $GITHUB_ENV
+
+      - name: Configure armv7-linux-musleabihf
+        if: matrix.target == 'armv7-unknown-linux-musleabihf'
+        run: |
+          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
+          echo "CC_armv7_unknown_linux_musleabihf=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
+          echo "CXX_armv7_unknown_linux_musleabihf=arm-linux-gnueabihf-g++" >> $GITHUB_ENV
+
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          sudo apt-get install -y musl-tools musl-dev
+
+      - name: Setup Android SDK
+        if: contains(matrix.target, 'android')
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Android NDK
+        if: contains(matrix.target, 'android')
+        run: |
+          sdkmanager "ndk;26.3.11579264"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> $GITHUB_ENV
+
+      - name: Find Android linker
+        if: contains(matrix.target, 'android')
+        run: |
+          echo "NDK path: $ANDROID_NDK_HOME"
+          find $ANDROID_NDK_HOME/toolchains -name "aarch64-linux-android*clang" -o -name "armv7a-linux-androideabi*clang" 2>/dev/null || true
+          ls -la $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/ 2>/dev/null | head -30 || true
+
+      - name: Configure Android cross-compile
+        if: matrix.target == 'armv7-linux-androideabi'
+        run: |
+          echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang" >> $GITHUB_ENV
+          echo "CC_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang" >> $GITHUB_ENV
+          echo "CXX_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang++" >> $GITHUB_ENV
+
+      - name: Configure Android cross-compile (aarch64)
+        if: matrix.target == 'aarch64-linux-android'
+        run: |
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang" >> $GITHUB_ENV
+          echo "CC_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang" >> $GITHUB_ENV
+          echo "CXX_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++" >> $GITHUB_ENV
+
+      - name: Install mingw
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: sudo apt-get install -y mingw-w64
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary
+        if: runner.os == 'Linux' && !contains(matrix.target, 'android') && !contains(matrix.target, 'aarch64-unknown-linux') && !contains(matrix.target, 'armv7-unknown-linux')
+        run: strip --strip-unneeded target/${{ matrix.target }}/release/tcpprepend${{ matrix.ext }}
+
+      - name: Strip aarch64 binary
+        if: contains(matrix.target, 'aarch64-unknown-linux')
+        run: aarch64-linux-gnu-strip --strip-unneeded target/${{ matrix.target }}/release/tcpprepend
+
+      - name: Strip armv7 binary
+        if: contains(matrix.target, 'armv7-unknown-linux')
+        run: arm-linux-gnueabihf-strip --strip-unneeded target/${{ matrix.target }}/release/tcpprepend
+
+      - name: Strip Android binary
+        if: matrix.target == 'armv7-linux-androideabi'
+        run: $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip target/${{ matrix.target }}/release/tcpprepend
+
+      - name: Strip Android binary (aarch64)
+        if: matrix.target == 'aarch64-linux-android'
+        run: $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip target/${{ matrix.target }}/release/tcpprepend
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          mkdir -p package
+          cp tcpprepend${{ matrix.ext }} package/
+          cd package
+          tar -czvf tcpprepend-${{ steps.version.outputs.VERSION }}-${{ matrix.name }}.tar.gz tcpprepend${{ matrix.ext }}
+        shell: bash
+
+      - name: Calculate checksum
+        run: |
+          cd target/${{ matrix.target }}/release/package
+          sha256sum tcpprepend-${{ steps.version.outputs.VERSION }}-${{ matrix.name }}.tar.gz > tcpprepend-${{ steps.version.outputs.VERSION }}-${{ matrix.name }}.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpprepend-${{ matrix.name }}
+          path: target/${{ matrix.target }}/release/package/tcpprepend-${{ steps.version.outputs.VERSION }}-${{ matrix.name }}.*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/*.tar.gz
+          generate_release_notes: true

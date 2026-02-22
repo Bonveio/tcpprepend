@@ -1,12 +1,19 @@
 [package]
 name = "tcpprepend"
-version = "0.1.0"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+version = "0.1.1"
+edition = "2024"
 
 [dependencies]
-anyhow = "1.0.66"
-base64 = "0.13.1"
-tokio = { version = "1.21.2", features = ["rt", "net", "macros", "time", "io-util"] }
-xflags = "0.3.1"
+xflags = "0.3.2"
+tokio = { version = "1.49", features = ["net", "io-util", "rt", "macros", "time", "signal"] }
+anyhow = "1.0.102"
+base64 = "0.22.1"
+memchr = "2.8.0"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["fmt", "env-filter"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

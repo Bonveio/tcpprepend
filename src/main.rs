@@ -1,74 +1,171 @@
-use std::{net::SocketAddr, time::Duration, sync::Arc};
+use anyhow::Context;
+use base64::Engine;
+use memchr::memmem::Finder;
+use std::{net::SocketAddr, time::Duration};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    time,
+};
+use tracing::{debug, error, info, warn};
 
-use tokio::{net::{TcpListener, TcpStream}, io::{AsyncReadExt, AsyncWriteExt}};
+const READ_BUF_SIZE: usize = 8192;
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+const ACCEPT_RETRY_DELAY_MS: u64 = 50;
 
-async fn handle_incoming(mut s: TcpStream, needle: Arc<Vec<u8>>, sa: SocketAddr, prepend: Arc<Vec<u8>>) -> anyhow::Result<()> {
-    if needle.len() > 0 {
-        let mut buf : Vec<u8> = Vec::with_capacity(needle.len()*2);
-        'wait_needle: loop {
-            let mut b = [0u8; 1];
-            match s.read(&mut b).await? {
-                0 => anyhow::bail!("Premature end of client stream"),
-                1 => {
-                    buf.push(b[0]);
-                    if buf.len() > needle.len() {
-                        if &buf[(buf.len() - needle.len())..buf.len()] == &needle[..] {
-                            eprintln!("  found matching request bytes");
-                            break 'wait_needle;
-                        }
-                    }
-                    if buf.len() >= needle.len()*2 {
-                        buf.copy_within(needle.len().., 0);
-                        buf.resize(needle.len(), 0);
-                    }
-                }
-                _ => unreachable!(),
+#[inline]
+fn find_needle_in_read(
+    finder: &Finder,
+    read_buf: &[u8],
+    n: usize,
+    tail: &mut Vec<u8>,
+    needle_len: usize,
+) -> bool {
+    if tail.is_empty() {
+        if finder.find(&read_buf[..n]).is_some() {
+            return true;
+        }
+        if needle_len > 1 {
+            let keep = needle_len.saturating_sub(1).min(n);
+            tail.extend_from_slice(&read_buf[n - keep..n]);
+        }
+        return false;
+    }
+
+    let tail_len = tail.len();
+    tail.extend_from_slice(&read_buf[..n]);
+    let total = tail.len();
+
+    if finder.find(tail).is_some() {
+        tail.truncate(tail_len);
+        return true;
+    }
+
+    if needle_len > 1 {
+        let keep = needle_len.saturating_sub(1).min(total);
+        tail.drain(..total - keep);
+    } else {
+        tail.clear();
+    }
+    false
+}
+
+async fn handle_incoming(
+    mut client: TcpStream,
+    finder: &'static Finder<'static>,
+    upstream_addr: SocketAddr,
+    prepend: &'static [u8],
+) -> anyhow::Result<()> {
+    if let Err(e) = client.set_nodelay(true) {
+        warn!("failed to set TCP_NODELAY on client socket: {}", e);
+    }
+
+    let needle_len = finder.needle().len();
+    if needle_len > 0 {
+        let mut tail: Vec<u8> = Vec::with_capacity(needle_len.saturating_sub(1));
+        let mut read_buf = [0u8; READ_BUF_SIZE];
+
+        loop {
+            let n = client
+                .read(&mut read_buf)
+                .await
+                .context("read from client failed while waiting for needle")?;
+
+            if n == 0 {
+                anyhow::bail!("Premature end of client stream while waiting for needle");
+            }
+
+            if find_needle_in_read(finder, &read_buf, n, &mut tail, needle_len) {
+                debug!("found needle");
+                break;
             }
         }
     }
 
-    let mut c = TcpStream::connect(sa).await?;
+    let mut upstream = time::timeout(
+        Duration::from_secs(CONNECT_TIMEOUT_SECS),
+        TcpStream::connect(upstream_addr),
+    )
+    .await
+    .context("connect timeout")?
+    .context("connect failed")?;
 
-    eprintln!("   connected to upstream");
-    s.write_all(&prepend).await?;
-    eprintln!("   wrote prepender bytes");
+    info!("connected to upstream {}", upstream_addr);
 
-    tokio::io::copy_bidirectional(&mut c, &mut s).await?;
+    if !prepend.is_empty() {
+        client
+            .write_all(prepend)
+            .await
+            .context("writing prepend failed")?;
+        debug!("wrote prepend bytes");
+    }
 
-    eprintln!("   finished proxying");
-    
+    let (read_up, read_client) = tokio::io::copy_bidirectional(&mut upstream, &mut client)
+        .await
+        .context("proxy failed")?;
+
+    debug!(
+        "finished proxying (up->client={} bytes, client->up={})",
+        read_up, read_client
+    );
+
     Ok(())
 }
 
-#[tokio::main(flavor="current_thread")]
-async fn main()  -> anyhow::Result<()>{
-    let opts = xflags::parse_or_exit!(
-        required listen : SocketAddr
+xflags::xflags! {
+    cmd Tcpprepend {
+        required listen: SocketAddr
         required request_needle_base64: String
-        required connect : SocketAddr
+        required connect: SocketAddr
         required response_prepend_base64: String
-    );
-
-    let needle = Arc::new(base64::decode(opts.request_needle_base64)?);
-    let prepend = Arc::new(base64::decode(opts.response_prepend_base64)?);
-
-    let l : TcpListener = TcpListener::bind(opts.listen).await?;
-    loop {
-        match l.accept().await {
-            Err(e) => {
-                eprintln!("Accept error: {}", e);
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Ok((s,a)) => {
-                eprintln!("Incoming connection from {}", a);
-                let needle = needle.clone();
-                let prepend = prepend.clone();
-                tokio::spawn( async move {
-                    if let Err(e) = handle_incoming(s, needle, opts.connect, prepend).await {
-                        eprintln!("   {}", e);
-                    }
-                });
-            }
-        }
     }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    let opts = Tcpprepend::from_env_or_exit();
+
+    let needle_vec = base64::engine::general_purpose::STANDARD
+        .decode(opts.request_needle_base64)
+        .context("failed to decode request needle")?;
+    let prepend_vec = base64::engine::general_purpose::STANDARD
+        .decode(opts.response_prepend_base64)
+        .context("failed to decode response prepend")?;
+
+    let needle: &'static [u8] = Box::leak(needle_vec.into_boxed_slice());
+    let prepend: &'static [u8] = Box::leak(prepend_vec.into_boxed_slice());
+    let finder: &'static Finder<'static> = Box::leak(Box::new(Finder::new(needle)));
+
+    let listener = TcpListener::bind(opts.listen)
+        .await
+        .context("bind failed")?;
+    info!("listening on {}", opts.listen);
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("shutdown requested; exiting accept loop");
+        }
+        _ = async {
+            loop {
+                let (socket, peer) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        error!("accept error: {}", e);
+                        time::sleep(Duration::from_millis(ACCEPT_RETRY_DELAY_MS)).await;
+                        continue;
+                    }
+                };
+
+                info!("incoming connection from {}", peer);
+
+                tokio::spawn(handle_incoming(socket, finder, opts.connect, prepend));
+            }
+        } => {}
+    }
+
+    Ok(())
 }
